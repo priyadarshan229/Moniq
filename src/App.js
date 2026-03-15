@@ -28,15 +28,6 @@ const PRESET_COLORS = [
   '#6366F1','#F43F5E','#84CC16','#F59E0B','#8B5CF6'
 ];
 
-const MONTHLY_TREND = [
-  { month: 'Oct', amount: 42000 },
-  { month: 'Nov', amount: 38000 },
-  { month: 'Dec', amount: 55000 },
-  { month: 'Jan', amount: 35000 },
-  { month: 'Feb', amount: 48000 },
-  { month: 'Mar', amount: 0 },
-];
-
 // ─── Styles ───────────────────────────────────────────────────────
 const S = {
   app: { background: '#07080A', minHeight: '100vh', fontFamily: "'DM Sans', sans-serif", color: '#EAEEF2' },
