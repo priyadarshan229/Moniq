@@ -1,4 +1,7 @@
 import React, { useState, useEffect } from 'react';
+import { signInWithPopup, signOut, onAuthStateChanged } from 'firebase/auth';
+import { doc, setDoc, getDoc, collection, addDoc, getDocs, deleteDoc } from 'firebase/firestore';
+import { auth, provider, db } from './firebase';
 import {
   PieChart, Pie, Cell, LineChart, Line,
   XAxis, YAxis, Tooltip, ResponsiveContainer
@@ -389,32 +392,6 @@ function CategoryModal({ onClose, onSave }) {
   );
 }
 
-// ─── Sign Up Modal ────────────────────────────────────────────────
-function SignUpModal({ onClose }) {
-  return (
-    <div style={S.overlay}>
-      <div style={S.modal}>
-        <button style={S.modalClose} onClick={onClose}>✕</button>
-        <div style={{ fontSize: '20px', fontWeight: '800', marginBottom: '6px' }}>💸 Moniq</div>
-        <div style={{ fontFamily: "'Syne', sans-serif", fontSize: '26px', fontWeight: '800', lineHeight: 1.2, marginBottom: '8px' }}>Save your<br/>financial data.</div>
-        <div style={{ fontSize: '13px', color: '#8A95A3', marginBottom: '32px', lineHeight: 1.5 }}>Sign up with your mobile number. Your expenses and budgets will be saved securely — forever.</div>
-
-        <label style={S.label}>Your Name</label>
-        <input style={S.input} placeholder="What should we call you?"/>
-
-        <label style={S.label}>Mobile Number</label>
-        <div style={{ display: 'flex', gap: '10px', marginBottom: '20px' }}>
-          <div style={{ background: '#0D0F12', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '10px', padding: '12px 14px', color: '#8A95A3', fontSize: '14px', whiteSpace: 'nowrap' }}>🇮🇳 +91</div>
-          <input placeholder="98765 43210" style={{ ...S.input, marginBottom: 0, border: '1px solid #00E5FF', boxShadow: '0 0 0 3px rgba(0,229,255,0.1)' }}/>
-        </div>
-
-        <button style={S.primaryBtn}>Send OTP →</button>
-        <div style={{ textAlign: 'center', fontSize: '11px', color: '#3D4A57', marginTop: '14px' }}>By continuing you agree to our Privacy Policy & Terms</div>
-      </div>
-    </div>
-  );
-}
-
 // ─── Budget Modal ─────────────────────────────────────────────────
 function BudgetModal({ onClose, onSave, categories }) {
   const [budgets, setBudgets] = useState(categories.reduce((acc, c) => ({ ...acc, [c.name]: '' }), {}));
@@ -447,6 +424,8 @@ function BudgetModal({ onClose, onSave, categories }) {
 
 // ─── Main App ─────────────────────────────────────────────────────
 export default function App() {
+  const [user, setUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
   const [screen, setScreen] = useState('landing');
   const [tab, setTab] = useState('dashboard');
   const [showSignUp, setShowSignUp] = useState(false);
@@ -461,6 +440,89 @@ export default function App() {
   const [creditDay, setCreditDay] = useState(1);
   const [salarySet, setSalarySet] = useState(false);
 
+  useEffect(() => {
+  const unsub = onAuthStateChanged(auth, async (firebaseUser) => {
+    if (firebaseUser) {
+      setUser(firebaseUser);
+      setScreen('app');
+      // Load user data from Firestore
+      const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
+      if (userDoc.exists()) {
+        const data = userDoc.data();
+        if (data.salary) setSalary(data.salary);
+        if (data.creditDay) setCreditDay(data.creditDay);
+        if (data.salarySet) setSalarySet(data.salarySet);
+      }
+      // Load expenses
+      const expSnap = await getDocs(collection(db, 'users', firebaseUser.uid, 'expenses'));
+      const loaded = expSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+      setExpenses(loaded);
+      // Load budgets
+      const budgetDoc = await getDoc(doc(db, 'users', firebaseUser.uid, 'settings', 'budgets'));
+      if (budgetDoc.exists()) setBudgets(budgetDoc.data());
+    } else {
+      setUser(null);
+    }
+    setAuthLoading(false);
+  });
+  return () => unsub();
+}, []);
+const handleSignIn = async () => {
+  try {
+    await signInWithPopup(auth, provider);
+  } catch (err) {
+    console.error('Sign in error:', err);
+  }
+};
+
+const handleSignOut = async () => {
+  await signOut(auth);
+  setUser(null);
+  setExpenses([]);
+  setBudgets({});
+  setSalary('');
+  setSalarySet(false);
+  setScreen('landing');
+};
+
+const saveExpense = async (expense) => {
+  if (user) {
+    const ref = await addDoc(
+      collection(db, 'users', user.uid, 'expenses'),
+      expense
+    );
+    return { ...expense, id: ref.id };
+  }
+  return expense;
+};
+
+const deleteExpense = async (id) => {
+  if (user) {
+    await deleteDoc(doc(db, 'users', user.uid, 'expenses', id));
+  }
+  setExpenses(prev => prev.filter(x => x.id !== id));
+};
+
+const saveSalarySettings = async () => {
+  if (!salary) return;
+  setSalarySet(true);
+  if (user) {
+    await setDoc(doc(db, 'users', user.uid), {
+      salary, creditDay, salarySet: true
+    }, { merge: true });
+  }
+  setTab('dashboard');
+};
+
+const saveBudgets = async (b) => {
+  setBudgets(b);
+  if (user) {
+    await setDoc(
+      doc(db, 'users', user.uid, 'settings', 'budgets'),
+      b
+    );
+  }
+};
   const salaryNum = Number(salary) || 0;
   const totalSpent = expenses.reduce((s, e) => s + e.amount, 0);
   const remaining = salaryNum - totalSpent;
@@ -491,6 +553,11 @@ export default function App() {
 
   const ordinal = (n) => `${n}${n===1?'st':n===2?'nd':n===3?'rd':'th'}`;
 
+  if (authLoading) return (
+  <div style={{ background: '#07080A', minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+    <div style={{ color: '#00E5FF', fontSize: '14px', fontFamily: "'DM Sans', sans-serif" }}>Loading...</div>
+  </div>
+);
   if (screen === 'landing') return <LandingPage onGetStarted={() => setScreen('app')}/>;
 
   return (
@@ -508,11 +575,14 @@ export default function App() {
           ))}
         </nav>
         <div style={S.sidebarBottom}>
-          <div style={S.guestCard} onClick={() => setShowSignUp(true)}>
+          <div style={S.guestCard} onClick={() => user ? handleSignOut() : setShowSignUp(true)}></div>
             <div style={S.guestAvatar}>👤</div>
             <div style={{ flex: 1 }}>
-              <div style={{ fontSize: '12px', fontWeight: '600', color: '#8A95A3' }}>Guest</div>
-              <div style={{ fontSize: '11px', color: '#3D4A57' }}>Sign up to save data</div>
+              <div style={{ fontSize: '12px', fontWeight: '600', color: user ? '#EAEEF2' : '#8A95A3' }}>
+                {user ? user.displayName?.split(' ')[0] : 'Guest'}
+            </div>
+            <div style={{ fontSize: '11px', color: '#3D4A57' }}>
+              {user ? user.email : 'Sign up to save data'}
             </div>
             <ChevronRight size={14} color="#3D4A57"/>
           </div>
@@ -522,8 +592,16 @@ export default function App() {
       {/* Save Banner */}
       <div style={S.banner}>
         <span>💾 Your session data will be lost when you close this tab.</span>
-        <strong style={{ color: '#00E5FF' }}>Sign up free to save everything.</strong>
-        <button style={S.bannerBtn} onClick={() => setShowSignUp(true)}>Save my data →</button>
+        {!user && (
+  <>
+    <strong style={{ color: '#00E5FF' }}>Sign up free to save everything.</strong>
+    <button style={S.bannerBtn} onClick={() => setShowSignUp(true)}>Save my data →</button>
+  </>
+)}
+{user && (
+  <strong style={{ color: '#00D68F' }}>✓ {user.displayName?.split(' ')[0]} · All data saved</strong>
+)}
+        
       </div>
 
       <main style={S.main}>
@@ -672,7 +750,7 @@ export default function App() {
                             <td style={{ ...S.td, color: '#3D4A57' }}>{e.date}</td>
                             <td style={{ ...S.td, color: e.paidBy === 'You' ? '#00E5FF' : '#8A95A3' }}>{e.paidBy}</td>
                             <td style={S.td}>
-                              <button onClick={() => setExpenses(prev => prev.filter(x => x.id !== e.id))}
+                              <button onClick={() => deleteExpense(e.id)}
                                 style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: '#3D4A57', padding: '4px', display: 'flex', alignItems: 'center', borderRadius: '4px' }}
                                 title="Delete">
                                 <Trash2 size={14}/>
@@ -792,7 +870,7 @@ export default function App() {
                   </div>
 
                   <button style={{ ...S.primaryBtn, opacity: salary ? 1 : 0.5 }}
-                    onClick={() => { if (salary) { setSalarySet(true); setTab('dashboard'); } }}>
+                    onClick={saveSalarySettings}>
                     Save & Go to Dashboard →
                   </button>
                 </div>
@@ -840,10 +918,29 @@ export default function App() {
       </main>
 
       {/* Modals */}
-      {showSignUp     && <SignUpModal    onClose={() => setShowSignUp(false)}/>}
-      {showAddExpense && <ExpenseModal   onClose={() => setShowAddExpense(false)} onSave={e => setExpenses(prev => [e, ...prev])} categories={categories}/>}
+      {showSignUp && (
+  <div style={S.overlay}>
+    <div style={S.modal}>
+      <button style={S.modalClose} onClick={() => setShowSignUp(false)}>✕</button>
+      <div style={{ fontSize: '20px', fontWeight: '800', marginBottom: '6px' }}>💸 Moniq</div>
+      <div style={{ fontFamily: "'Syne', sans-serif", fontSize: '26px', fontWeight: '800', lineHeight: 1.2, marginBottom: '8px' }}>Save your<br/>financial data.</div>
+      <div style={{ fontSize: '13px', color: '#8A95A3', marginBottom: '32px', lineHeight: 1.5 }}>Sign in with Google to save your expenses, budgets and salary settings — securely and permanently.</div>
+      <button
+        onClick={() => { handleSignIn(); setShowSignUp(false); }}
+        style={{ width: '100%', background: 'white', color: '#000', border: 'none', borderRadius: '10px', padding: '14px', fontSize: '14px', fontWeight: '700', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px' }}>
+        <img src="https://www.google.com/favicon.ico" width="18" height="18" alt="Google"/>
+        Continue with Google
+      </button>
+      <div style={{ textAlign: 'center', fontSize: '11px', color: '#3D4A57', marginTop: '14px' }}>By continuing you agree to our Privacy Policy & Terms</div>
+    </div>
+  </div>
+)}
+      {showAddExpense && <ExpenseModal   onClose={() => setShowAddExpense(false)} onSave={async (e) => {
+  const saved = await saveExpense(e);
+  setExpenses(prev => [saved, ...prev]);
+}}categories={categories}/>}
       {showCategory   && <CategoryModal onClose={() => setShowCategory(false)}   onSave={c => setCategories(prev => [...prev, c])}/>}
-      {showBudget     && <BudgetModal   onClose={() => setShowBudget(false)}      onSave={b => setBudgets(b)} categories={categories}/>}
+      {showBudget     && <BudgetModal   onClose={() => setShowBudget(false)}     onSave={saveBudgets} categories={categories}/>}
     </div>
   );
 }
