@@ -302,7 +302,7 @@ function LandingPage({ onGetStarted }) {
 function ExpenseModal({ onClose, onSave, categories }) {
   const [form, setForm] = useState({
     desc: '', amount: '', category: categories[0]?.name || 'Food',
-    date: new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }),
+    date: new Date().toISOString().split('T')[0],
     paidBy: 'You', notes: ''
   });
   const requiresNotes = form.category === 'Other';
@@ -337,6 +337,13 @@ function ExpenseModal({ onClose, onSave, categories }) {
           value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })}
         />
 
+        <label style={S.label}>Date</label>
+        <input
+          style={S.input}
+          type="date"
+          value={form.date}
+          onChange={e => setForm({ ...form, date: e.target.value })}
+        />
         <label style={S.label}>Paid By</label>
         <input style={S.input} placeholder="You" value={form.paidBy} onChange={e => setForm({ ...form, paidBy: e.target.value })}/>
 
