@@ -9,7 +9,7 @@ import {
 import {
   LayoutDashboard, ArrowUpDown, Target, Building2,
   Users, Calendar, Plus, Download, AlertTriangle,
-  ChevronRight, Trash2, Settings, Shield, Eye, Lock, Server, X, TrendingDown, TrendingUp, Home
+  ChevronRight, Trash2, Settings, Shield, Eye, Lock, Server, X, TrendingDown, TrendingUp, Home, Mic, MicOff
 } from 'lucide-react';
 import './mobile.css';
 
@@ -490,6 +490,267 @@ function DashboardDemoPanel({ onDismiss }) {
   );
 }
 
+function VoiceAgent({ onSaveExpense, categories, autoStart, onAutoStartHandled }) {
+  const [listening, setListening] = useState(false);
+  const [interim, setInterim] = useState('');
+  const [messages, setMessages] = useState([]);
+  const [pending, setPending] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const recognitionRef = useRef(null);
+  const messagesEndRef = useRef(null);
+  const apiHistoryRef = useRef([]);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, loading]);
+
+  useEffect(() => {
+    if (autoStart) { startListening(); onAutoStartHandled(); }
+  }, [autoStart]); // eslint-disable-line
+
+  useEffect(() => { return () => { recognitionRef.current?.stop(); }; }, []);
+
+  const startListening = () => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) { setError('Speech recognition not supported. Use Chrome or Edge.'); return; }
+    setError('');
+    const recognition = new SR();
+    recognition.lang = 'en-IN';
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.onstart = () => setListening(true);
+    recognition.onerror = (e) => {
+      setListening(false); setInterim('');
+      if (e.error !== 'aborted' && e.error !== 'no-speech') setError('Couldn\'t catch that. Tap mic to try again.');
+    };
+    recognition.onend = () => { setListening(false); setInterim(''); };
+    recognition.onresult = (event) => {
+      let interimText = '', finalText = '';
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        if (event.results[i].isFinal) finalText += event.results[i][0].transcript;
+        else interimText += event.results[i][0].transcript;
+      }
+      setInterim(interimText);
+      if (finalText.trim()) { setInterim(''); handleTranscript(finalText.trim()); }
+    };
+    recognitionRef.current = recognition;
+    try { recognition.start(); } catch (e) { setError('Microphone error. Check permissions and try again.'); }
+  };
+
+  const stopListening = () => { recognitionRef.current?.stop(); };
+
+  const handleTranscript = async (text) => {
+    setMessages(prev => [...prev, { role: 'user', text, id: Date.now() }]);
+    apiHistoryRef.current.push({ role: 'user', content: text });
+    setLoading(true); setError('');
+    try {
+      const today = new Date().toISOString().split('T')[0];
+      const catNames = categories.map(c => c.name).join(', ');
+      const system = `You are an expense extraction agent for Indian users. Extract expense details from English or Hinglish voice transcripts.
+
+Hinglish vocabulary: kal=yesterday, aaj=today, parso=day before yesterday, diye/diya/diye the=paid, pe/par=on/at, ka/ke liye=for, bhai/yaar=filler (ignore), GPay/PhonePe/UPI/cash/card=payment method.
+Available categories: ${catNames}
+Confidence scoring: amount present(+0.4), merchant/description present(+0.3), category inferable(+0.2), date inferable(+0.1). Max=1.0.
+Today's date: ${today}
+
+Reply ONLY with valid JSON, no markdown:
+{"amount":850,"merchant":"Swiggy","category":"Food","paymentMethod":"GPay","date":"${today}","confidence":0.9,"needsClarification":false,"clarificationQuestion":null}
+
+If confidence < 0.80, set needsClarification:true and provide a short, focused clarificationQuestion for the missing field.`;
+
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': process.env.REACT_APP_ANTHROPIC_API_KEY || '',
+          'anthropic-version': '2023-06-01',
+          'anthropic-dangerous-direct-browser-access': 'true',
+        },
+        body: JSON.stringify({
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 300,
+          system,
+          messages: [...apiHistoryRef.current],
+        }),
+      });
+      if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error?.message || `API error ${res.status}`); }
+      const data = await res.json();
+      const rawText = data.content[0].text.trim().replace(/^```json?\s*/,'').replace(/\s*```$/,'');
+      const result = JSON.parse(rawText);
+      apiHistoryRef.current.push({ role: 'assistant', content: rawText });
+
+      const yest = new Date(Date.now() - 86400000).toISOString().split('T')[0];
+      const dateLabel = result.date === today ? 'today' : result.date === yest ? 'yesterday' : (result.date || today);
+      let displayText;
+      if (result.needsClarification || result.confidence < 0.8) {
+        displayText = result.clarificationQuestion || 'Could you give me more detail — amount, merchant, or category?';
+      } else {
+        displayText = `Got it! ₹${(result.amount || 0).toLocaleString('en-IN')} at ${result.merchant || 'unknown'} · ${result.category}${result.paymentMethod ? ' · ' + result.paymentMethod : ''} · ${dateLabel}`;
+      }
+
+      setMessages(prev => [...prev, { role: 'assistant', text: displayText, data: result, id: Date.now() + 1 }]);
+      if (!result.needsClarification && result.confidence >= 0.8) setPending(result);
+    } catch (err) {
+      setMessages(prev => [...prev, { role: 'assistant', text: 'Sorry, I had trouble with that. Please try again.', id: Date.now() + 1, isError: true }]);
+      apiHistoryRef.current.push({ role: 'assistant', content: 'Error.' });
+      setError(err.message || 'Something went wrong');
+    }
+    setLoading(false);
+  };
+
+  const handleSave = async () => {
+    if (!pending) return;
+    const expense = {
+      desc: pending.merchant || 'Voice expense',
+      amount: Number(pending.amount) || 0,
+      category: pending.category || 'Other',
+      date: pending.date || new Date().toISOString().split('T')[0],
+      paidBy: 'You',
+      notes: pending.paymentMethod ? `Paid via ${pending.paymentMethod}` : '',
+      id: Date.now(),
+    };
+    await onSaveExpense(expense);
+    setMessages(prev => [...prev, { role: 'assistant', text: `✓ Saved! ₹${expense.amount.toLocaleString('en-IN')} at ${expense.desc} added to ${expense.category}.`, id: Date.now(), isSaved: true }]);
+    setPending(null);
+  };
+
+  const handleDismiss = () => {
+    setPending(null);
+    setMessages(prev => [...prev, { role: 'assistant', text: "OK, skipped. Say another expense whenever you're ready.", id: Date.now() }]);
+  };
+
+  const clearAll = () => { setMessages([]); setPending(null); setError(''); apiHistoryRef.current = []; };
+
+  const today = new Date().toISOString().split('T')[0];
+  const yest = new Date(Date.now() - 86400000).toISOString().split('T')[0];
+
+  return (
+    <div>
+      <div style={S.pageHeader}>
+        <div>
+          <div style={S.pageTitle}>Voice Agent</div>
+          <div style={S.pageSub}>Speak naturally — "Swiggy pe 450 diya aaj GPay se"</div>
+        </div>
+        {messages.length > 0 && (
+          <button onClick={clearAll} style={{ background: '#131619', border: '1px solid rgba(255,255,255,0.06)', color: '#8A95A3', padding: '8px 14px', borderRadius: '8px', fontSize: '12px', cursor: 'pointer' }}>
+            Clear
+          </button>
+        )}
+      </div>
+
+      {/* Chat history */}
+      <div style={{ ...S.card, padding: 0, marginBottom: '16px', minHeight: '260px', maxHeight: isMobile() ? '40vh' : '45vh', overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
+        {messages.length === 0 && !loading ? (
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '40px 24px', textAlign: 'center' }}>
+            <div style={{ fontSize: '36px', marginBottom: '12px' }}>🎙️</div>
+            <div style={{ fontSize: '14px', fontWeight: '600', marginBottom: '6px' }}>Ready to listen</div>
+            <div style={{ fontSize: '13px', color: '#8A95A3', maxWidth: '280px', lineHeight: 1.6 }}>Tap the mic and say an expense in English or Hinglish</div>
+          </div>
+        ) : (
+          <div style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            {messages.map(msg => (
+              <div key={msg.id} style={{ display: 'flex', justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start' }}>
+                <div style={{
+                  maxWidth: '85%', padding: '9px 13px',
+                  borderRadius: msg.role === 'user' ? '14px 14px 3px 14px' : '14px 14px 14px 3px',
+                  background: msg.role === 'user' ? 'rgba(0,229,255,0.1)' : msg.isSaved ? 'rgba(0,214,143,0.1)' : '#131619',
+                  border: msg.role === 'user' ? '1px solid rgba(0,229,255,0.2)' : msg.isSaved ? '1px solid rgba(0,214,143,0.2)' : '1px solid rgba(255,255,255,0.06)',
+                  fontSize: '13px', color: msg.isError ? '#FF3B5C' : '#EAEEF2', lineHeight: 1.5,
+                }}>
+                  {msg.text}
+                </div>
+              </div>
+            ))}
+            {loading && (
+              <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
+                <div style={{ padding: '9px 16px', background: '#131619', borderRadius: '14px 14px 14px 3px', border: '1px solid rgba(255,255,255,0.06)', display: 'flex', gap: '5px', alignItems: 'center' }}>
+                  <div className="voice-dot"/><div className="voice-dot" style={{ animationDelay: '0.2s' }}/><div className="voice-dot" style={{ animationDelay: '0.4s' }}/>
+                </div>
+              </div>
+            )}
+            <div ref={messagesEndRef}/>
+          </div>
+        )}
+      </div>
+
+      {/* Pending confirmation card */}
+      {pending && (
+        <div style={{ background: 'rgba(0,229,255,0.05)', border: '1px solid rgba(0,229,255,0.2)', borderRadius: '14px', padding: '18px', marginBottom: '16px' }}>
+          <div style={{ fontSize: '11px', color: '#00E5FF', letterSpacing: '1px', textTransform: 'uppercase', marginBottom: '14px' }}>Confirm & Save</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginBottom: '14px' }}>
+            {[
+              ['Amount', `₹${(pending.amount || 0).toLocaleString('en-IN')}`],
+              ['Merchant', pending.merchant || '—'],
+              ['Category', pending.category || '—'],
+              ['Payment', pending.paymentMethod || '—'],
+              ['Date', pending.date === today ? 'Today' : pending.date === yest ? 'Yesterday' : (pending.date || 'Today')],
+              ['Confidence', `${Math.round((pending.confidence || 0) * 100)}%`],
+            ].map(([k, v]) => (
+              <div key={k} style={{ background: '#111418', borderRadius: '8px', padding: '8px 12px' }}>
+                <div style={{ fontSize: '10px', color: '#3D4A57', textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: '2px' }}>{k}</div>
+                <div style={{ fontSize: '13px', fontWeight: '600' }}>{v}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{ display: 'flex', gap: '10px' }}>
+            <button onClick={handleSave} style={{ flex: 2, background: '#00E5FF', color: '#000', border: 'none', borderRadius: '8px', padding: '11px', fontSize: '13px', fontWeight: '700', cursor: 'pointer' }}>
+              Save Expense →
+            </button>
+            <button onClick={handleDismiss} style={{ flex: 1, background: '#131619', border: '1px solid rgba(255,255,255,0.1)', color: '#8A95A3', borderRadius: '8px', padding: '11px', fontSize: '13px', cursor: 'pointer' }}>
+              Skip
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Live interim transcript */}
+      {interim && (
+        <div style={{ background: '#131619', border: '1px solid rgba(0,229,255,0.15)', borderRadius: '10px', padding: '12px 16px', marginBottom: '16px', fontSize: '14px', color: '#8A95A3', fontStyle: 'italic' }}>
+          "{interim}..."
+        </div>
+      )}
+
+      {/* Error */}
+      {error && (
+        <div style={{ background: 'rgba(255,59,92,0.08)', border: '1px solid rgba(255,59,92,0.2)', borderRadius: '10px', padding: '11px 14px', marginBottom: '16px', fontSize: '12px', color: '#FF3B5C' }}>
+          {error}
+        </div>
+      )}
+
+      {/* Mic button */}
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px', paddingBottom: '4px' }}>
+        <button onClick={listening ? stopListening : startListening} style={{
+          width: '68px', height: '68px', borderRadius: '50%',
+          border: `2px solid ${listening ? '#FF3B5C' : 'rgba(0,229,255,0.4)'}`,
+          background: listening ? 'rgba(255,59,92,0.1)' : 'rgba(0,229,255,0.08)',
+          color: listening ? '#FF3B5C' : '#00E5FF',
+          cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+          transition: 'all 0.2s',
+          boxShadow: listening ? '0 0 24px rgba(255,59,92,0.3)' : '0 0 16px rgba(0,229,255,0.1)',
+        }}>
+          {listening ? <MicOff size={26}/> : <Mic size={26}/>}
+        </button>
+        <div style={{ fontSize: '12px', color: '#3D4A57' }}>{listening ? 'Listening… tap to stop' : 'Tap to speak'}</div>
+      </div>
+
+      {/* Example phrases */}
+      {messages.length === 0 && (
+        <div style={{ marginTop: '20px' }}>
+          <div style={{ fontSize: '11px', color: '#3D4A57', textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: '10px' }}>Try saying</div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+            {['Swiggy pe 450 diya aaj', 'Ola 180 yesterday UPI', 'BigBasket 1200 GPay se', 'Petrol 800 cash'].map(p => (
+              <div key={p} style={{ background: '#131619', border: '1px solid rgba(255,255,255,0.06)', borderRadius: '20px', padding: '6px 14px', fontSize: '12px', color: '#8A95A3' }}>
+                "{p}"
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function App() {
   const [user, setUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
@@ -508,6 +769,7 @@ export default function App() {
   const [salarySet, setSalarySet] = useState(false);
   const [manualDaysPassed, setManualDaysPassed] = useState('');
   const [useManualDays, setUseManualDays] = useState(false);
+  const [voiceAutoStart, setVoiceAutoStart] = useState(false);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (firebaseUser) => {
@@ -595,6 +857,7 @@ export default function App() {
     { id: 'emi',        label: 'EMI Tracker',  icon: <Building2 size={15}/> },
     { id: 'split',      label: 'Split',        icon: <Users size={15}/> },
     { id: 'salary',     label: 'Salary Cycle', icon: <Calendar size={15}/> },
+    { id: 'voice',      label: 'Voice',        icon: <Mic size={15}/> },
   ];
 
   const ordinal = (n) => `${n}${n===1?'st':n===2?'nd':n===3?'rd':'th'}`;
@@ -818,7 +1081,7 @@ export default function App() {
                 </div>
               )}
               <button onClick={() => setShowCategory(true)}
-                style={{ position: 'fixed', bottom: isMobile() ? '80px' : '24px', right: '24px', background: '#131619', border: '1px solid rgba(255,255,255,0.1)', color: '#8A95A3', padding: '10px 16px', borderRadius: '10px', fontSize: '12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', zIndex: 500 }}>
+                style={{ position: 'fixed', bottom: isMobile() ? '148px' : '84px', right: '24px', background: '#131619', border: '1px solid rgba(255,255,255,0.1)', color: '#8A95A3', padding: '10px 16px', borderRadius: '10px', fontSize: '12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', zIndex: 500 }}>
                 <Plus size={13}/> New Category
               </button>
             </div>
@@ -961,8 +1224,39 @@ export default function App() {
             </div>
           )}
 
+          {tab === 'voice' && (
+            <VoiceAgent
+              onSaveExpense={async (e) => { const saved = await saveExpense(e); setExpenses(prev => [saved, ...prev]); }}
+              categories={categories}
+              autoStart={voiceAutoStart}
+              onAutoStartHandled={() => setVoiceAutoStart(false)}
+            />
+          )}
+
         </div>
       </main>
+
+      {/* ── Floating mic button (all tabs) ── */}
+      <button
+        onClick={() => { setTab('voice'); setVoiceAutoStart(true); }}
+        title="Voice Agent"
+        style={{
+          position: 'fixed',
+          bottom: isMobile() ? '84px' : '24px',
+          right: '24px',
+          width: '48px', height: '48px',
+          borderRadius: '50%',
+          background: tab === 'voice' ? 'rgba(0,229,255,0.15)' : '#0D0F12',
+          border: `1px solid ${tab === 'voice' ? 'rgba(0,229,255,0.4)' : 'rgba(255,255,255,0.1)'}`,
+          color: tab === 'voice' ? '#00E5FF' : '#8A95A3',
+          cursor: 'pointer',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          zIndex: 400,
+          boxShadow: '0 4px 16px rgba(0,0,0,0.4)',
+          transition: 'all 0.2s',
+        }}>
+        <Mic size={18}/>
+      </button>
 
       {/* ── Bottom Nav (mobile only — shown via CSS) ── */}
       <nav className="bottom-nav">
